@@ -1,0 +1,74 @@
+# File1
+env:
+  AZURE_CONTAINER_REGISTRY: tficergacr       # set this to the name of your container registry
+  RESOURCE_GROUP: tfaks_rg                     # set this to the resource group containing your AKS cluster
+  CLUSTER_NAME: terraform-aks                # set this to the name of your AKS cluster
+  APP_NAME: html-server-image
+  NAMESPACE: htlmlfrontend
+  REGISTRY_URL: https://tficergacr.azurecr.io        # set this to the URL of your registry
+  # If you bake using helm:
+  #CHART_PATH: https://helm.sikalabs.io/                   # set this to the path to your helm file
+  #CHART_OVERRIDE_PATH: MY_OVERRIDE_FILES     # set this to an array of override file paths
+  
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@master
+    
+      name: Azure Login
+    - uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+      
+      name: Attach ACR to AKS
+    - uses: azure/CLI@v1
+      with:
+        azcliversion: 2.30.0
+        inlineScript: |
+          az configure --defaults acr=${{ env.AZURE_CONTAINER_REGISTRY }}
+          az acr build . -t ${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${{ env.APP_NAME }}:${{ github.sha }} 
+        
+    # Connect to Azure Container Registry (ACR)
+      name: ACR Login
+    - uses: azure/docker-login@v1
+      with:
+        login-server: ${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io
+        username: ${{ secrets.REGISTRY_USERNAME }} 
+        password: ${{ secrets.REGISTRY_PASSWORD }}
+   
+      name: Gets K8s context
+    - uses: azure/aks-set-context@4e5aec273183a197b181314721843e047123d9fa
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        resource-group: ${{ env.RESOURCE_GROUP }}
+        cluster-name: ${{ env.CLUSTER_NAME }}
+      id: login 
+    
+       # Create namespace if doesn't exist
+    - run: |
+        kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o json | kubectl apply -f -
+    
+    # Create image pull secret for ACR
+    - uses: azure/k8s-create-secret@v1
+      with:
+        container-registry-url: ${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io
+        container-registry-username: ${{ secrets.REGISTRY_USERNAME }}
+        container-registry-password: ${{ secrets.REGISTRY_PASSWORD }}
+        secret-name: ${{ secrets.REGISTRY_SECRET }}
+        namespace: ${{ env.NAMESPACE }}
+        arguments: --force true
+    
+    # Deploy app to AKS
+    - uses: azure/k8s-deploy@v1
+      with:
+        manifests: |
+          ${{ github.workspace }}/manifests/deployment.yaml
+          ${{ github.workspace }}/manifests/service.yaml
+        images: |
+          ${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${{ env.APP_NAME }}:${{ github.sha }}
+        imagepullsecrets: |
+          ${{ secrets.REGISTRY_SECRET }}
+        namespace: ${{ env.NAMESPACE }}
